@@ -1,6 +1,7 @@
 import sys
 import copy
 import logging
+from StringIO import StringIO
 
 from django.conf import settings
 from django.core import serializers
@@ -311,13 +312,7 @@ class ROAModel(models.Model):
         need for overrides of save() to pass around internal-only parameters
         ('raw', 'cls', and 'origin').
         """
-
-        # rm cls, origin
-        assert not (force_insert and (force_update or update_fields))
-        assert update_fields is None or len(update_fields) > 0
-        cls = cls or self.__class__
-        origin = origin or self.__class__
-
+        assert not (force_insert and force_update)
         if cls is None:
             cls = self.__class__
             meta = cls._meta
@@ -363,60 +358,17 @@ class ROAModel(models.Model):
             get_args = {'format': ROA_FORMAT}
             get_args.update(ROA_CUSTOM_ARGS)
 
-            serializer = serializers.get_serializer(ROA_FORMAT)
-            if hasattr(serializer, 'serialize_object'):
-                payload = serializer().serialize_object(self)
-            else:
-                payload = {}
-                local_fields = []
-                m2m_fields = []
-                attribute_map = ROA_MODEL_CREATE_MAPPING
-
-                if force_update or pk_is_set and not self.pk is None:
-                    attribute_map = ROA_MODEL_UPDATE_MAPPING
-
-                if model_name in attribute_map:
-                    for field in meta.local_fields:
-                        if field.attname in attribute_map.get(model_name):
-                            local_fields.append(field)
-                    for field in m2m_fields:
-                        if field.attname in attribute_map.get(model_name):
-                            m2m_fields.append(field)
-                else:
-                    local_fields = meta.local_fields
-                    m2m_fields = meta.many_to_many
-
-                for field in local_fields:
-                    # Handle FK fields
-                    if isinstance(field, models.ForeignKey):
-                        field_attr = getattr(self, field.name)
-                        if field_attr is None:
-                            payload[field.attname] = None
-                        else:
-                            payload[field.attname] = field_attr.pk
-                    # Handle all other fields
-                    else:
-                        payload[field.name] = field.value_to_string(self)
-
-                # Handle M2M relations in case of update
-                if force_update or pk_is_set and not self.pk is None:
-                    for field in meta.many_to_many:
-                        # First try to get ids from var set in query's add/remove/clear
-                        if hasattr(self, '%s_updated_ids' % field.attname):
-                            field_pks = getattr(self, '%s_updated_ids' % field.attname)
-                        else:
-                            field_pks = [obj.pk for obj in field.value_from_object(self)]
-                        payload[field.attname] = ','.join(smart_unicode(pk) for pk in field_pks)
+            serializer = self.get_serializer(self)
+            payload = self.get_renderer().render(serializer.data)
 
             # check if resource use custom primary key
             if not meta.pk.attname in ['pk', 'id']:
                 # consider it might be inserting so check it first
                 # @todo: try to improve this block to check if custom pripary key is not None first
                 resource = Resource(self.get_resource_url_detail(),
-                                    headers=ROA_HEADERS,
                                     filters=ROA_FILTERS)
                 try:
-                    response = resource.get(payload=None, **get_args)
+                    response = resource.get(payload=None, headers=ROA_HEADERS, **get_args)
                 except ResourceNotFound:
                     # since such resource does not exist, it's actually creating
                     pk_is_set = False
@@ -426,7 +378,6 @@ class ROAModel(models.Model):
             if force_update or pk_is_set and not self.pk is None:
                 record_exists = True
                 resource = Resource(self.get_resource_url_detail(),
-                                    headers=ROA_HEADERS,
                                     filters=ROA_FILTERS)
                 try:
                     logger.debug(u"""Modifying : "%s" through %s
@@ -435,13 +386,12 @@ class ROAModel(models.Model):
                                   force_unicode(resource.uri),
                                   force_unicode(payload),
                                   force_unicode(get_args)))
-                    response = resource.put(payload=payload, **get_args)
+                    response = resource.put(payload=payload, headers=ROA_HEADERS, **get_args)
                 except RequestFailed as e:
                     raise ROAException(e)
             else:
                 record_exists = False
                 resource = Resource(self.get_resource_url_list(),
-                                    headers=ROA_HEADERS,
                                     filters=ROA_FILTERS)
                 try:
                     logger.debug(u"""Creating  : "%s" through %s
@@ -450,7 +400,7 @@ class ROAModel(models.Model):
                                   force_unicode(resource.uri),
                                   force_unicode(payload),
                                   force_unicode(get_args)))
-                    response = resource.post(payload=payload, **get_args)
+                    response = resource.post(payload=payload, headers=ROA_HEADERS, **get_args)
                 except RequestFailed as e:
                     raise ROAException(e)
 
@@ -459,20 +409,13 @@ class ROAModel(models.Model):
             for local_name, remote_name in ROA_MODEL_NAME_MAPPING:
                 response = response.replace(remote_name, local_name)
 
-            deserializer = serializers.get_deserializer(ROA_FORMAT)
-            if hasattr(deserializer, 'deserialize_object'):
-                result = deserializer(response).deserialize_object(response)
-            else:
-                # API might respond with HTTP status code only so check first if
-                # response is not empty
-                result = len(response) and deserializer(response).next() or None
+            parser = self.get_parser()
+            serializer = self.get_serializer(data=parser.parse(StringIO(response)))
 
-            if result:
-                try:
-                    self.pk = int(result.object.pk)
-                except ValueError:
-                    self.pk = result.object.pk
-                self = result.object
+            if not serializer.is_valid():
+                raise ROAException('Invalid deserialization')
+
+            self = serializer.object
 
         if origin:
             signals.post_save.send(sender=origin, instance=self,
@@ -487,13 +430,12 @@ class ROAModel(models.Model):
 
         # Deletion in cascade should be done server side.
         resource = Resource(self.get_resource_url_detail(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS)
 
         logger.debug(u"""Deleting  : "%s" through %s""" % \
             (unicode(self), unicode(resource.uri)))
 
-        resource.delete(**ROA_CUSTOM_ARGS)
+        resource.delete(headers=ROA_HEADERS, **ROA_CUSTOM_ARGS)
 
     delete.alters_data = True
 

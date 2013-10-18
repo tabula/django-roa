@@ -1,4 +1,5 @@
 import logging
+from StringIO import StringIO
 
 from django.conf import settings
 from django.db.models import query
@@ -179,7 +180,6 @@ class RemoteQuerySet(query.QuerySet):
         remote web service.
         """
         resource = Resource(self.model.get_resource_url_list(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS)
         try:
             parameters = self.query.parameters
@@ -188,7 +188,7 @@ class RemoteQuerySet(query.QuerySet):
                           self.model.__name__,
                           resource.uri,
                           force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except ResourceNotFound:
             return
         except Exception as e:
@@ -196,15 +196,14 @@ class RemoteQuerySet(query.QuerySet):
 
         response = force_unicode(response.body_string()).encode(DEFAULT_CHARSET)
 
-        for local_name, remote_name in ROA_MODEL_NAME_MAPPING:
-            response = response.replace(remote_name, local_name)
+        stream = StringIO(response)
+        data = self.model.get_parser().parse(stream)
 
-        try:
-            deserialize = self.model.deserialize
-        except AttributeError:
-            deserialize = serializers.deserialize
-        iterator = deserialize(ROA_FORMAT, response)
-        for res in iterator:
+        serializer = self.model.get_serializer(data=data)
+        if not serializer.is_valid():
+            raise ROAException('Invalid deserialization')
+
+        for obj in serializer.object:
             obj = res.object
             yield obj
 
@@ -222,7 +221,6 @@ class RemoteQuerySet(query.QuerySet):
         # for all model without relying on get_resource_url_list
         instance = clone.model()
         resource = Resource(instance.get_resource_url_count(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS)
         try:
             parameters = clone.query.parameters
@@ -231,7 +229,7 @@ class RemoteQuerySet(query.QuerySet):
                 clone.model.__name__,
                 resource.uri,
                 force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except Exception as e:
             raise ROAException(e)
 
@@ -258,8 +256,8 @@ class RemoteQuerySet(query.QuerySet):
             instance.id = id
         else:
             instance.pk = pk
+
         resource = Resource(instance.get_resource_url_detail(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS,
                             **kwargs)
         try:
@@ -269,7 +267,7 @@ class RemoteQuerySet(query.QuerySet):
                 clone.model.__name__,
                 resource.uri,
                 force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except Exception as e:
             raise ROAException(e)
 
@@ -278,16 +276,13 @@ class RemoteQuerySet(query.QuerySet):
         for local_name, remote_name in ROA_MODEL_NAME_MAPPING:
             response = response.replace(remote_name, local_name)
 
-        try:
-            return self.model.deserialize(ROA_FORMAT, response)
-        except AttributeError:
-            deserializer = serializers.get_deserializer(ROA_FORMAT)
-            if hasattr(deserializer, 'deserialize_object'):
-                result = deserializer(response).deserialize_object(response)
-            else:
-                result = deserializer(response).next()
+        parser = self.model.get_parser()
+        parsed_data = parser.parse(StringIO(response))
+        serializer = self.model.get_serializer(data=parsed_data)
+        if not serializer.is_valid():
+            raise ROAException("Couldn't validate the data ({})" % response)
 
-        return result.object
+        return serializer.object
 
     def get(self, *args, **kwargs):
         """
