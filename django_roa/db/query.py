@@ -1,14 +1,15 @@
 import logging
+from StringIO import StringIO
 
 from django.conf import settings
 from django.db.models import query
 from django.core import serializers
 # Django >= 1.5
 try:
-	from django.db.models.constants import LOOKUP_SEP
+    from django.db.models.constants import LOOKUP_SEP
 #Django < 1.4
 except:
-	from django.db.models.sql.constants import LOOKUP_SEP
+    from django.db.models.sql.constants import LOOKUP_SEP
 from django.db.models.query_utils import Q
 from django.utils.encoding import force_unicode
 
@@ -24,6 +25,7 @@ ROA_FORMAT = getattr(settings, 'ROA_FORMAT', 'json')
 ROA_FILTERS = getattr(settings, 'ROA_FILTERS', {})
 
 DEFAULT_CHARSET = getattr(settings, 'DEFAULT_CHARSET', 'utf-8')
+
 
 class Query(object):
     def __init__(self):
@@ -153,6 +155,8 @@ class RemoteQuerySet(query.QuerySet):
 
         self.params = {}
 
+        self._prefetch_related_lookups = False
+
     ########################
     # PYTHON MAGIC METHODS #
     ########################
@@ -176,7 +180,6 @@ class RemoteQuerySet(query.QuerySet):
         remote web service.
         """
         resource = Resource(self.model.get_resource_url_list(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS)
         try:
             parameters = self.query.parameters
@@ -185,7 +188,7 @@ class RemoteQuerySet(query.QuerySet):
                           self.model.__name__,
                           resource.uri,
                           force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except ResourceNotFound:
             return
         except Exception as e:
@@ -193,10 +196,14 @@ class RemoteQuerySet(query.QuerySet):
 
         response = force_unicode(response.body_string()).encode(DEFAULT_CHARSET)
 
-        for local_name, remote_name in ROA_MODEL_NAME_MAPPING:
-            response = response.replace(remote_name, local_name)
+        stream = StringIO(response)
+        data = self.model.get_parser().parse(stream)
 
-        for res in serializers.deserialize(ROA_FORMAT, response):
+        serializer = self.model.get_serializer(data=data)
+        if not serializer.is_valid():
+            raise ROAException('Invalid deserialization')
+
+        for obj in serializer.object:
             obj = res.object
             yield obj
 
@@ -214,7 +221,6 @@ class RemoteQuerySet(query.QuerySet):
         # for all model without relying on get_resource_url_list
         instance = clone.model()
         resource = Resource(instance.get_resource_url_count(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS)
         try:
             parameters = clone.query.parameters
@@ -223,7 +229,7 @@ class RemoteQuerySet(query.QuerySet):
                 clone.model.__name__,
                 resource.uri,
                 force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except Exception as e:
             raise ROAException(e)
 
@@ -250,8 +256,8 @@ class RemoteQuerySet(query.QuerySet):
             instance.id = id
         else:
             instance.pk = pk
+
         resource = Resource(instance.get_resource_url_detail(),
-                            headers=ROA_HEADERS,
                             filters=ROA_FILTERS,
                             **kwargs)
         try:
@@ -261,7 +267,7 @@ class RemoteQuerySet(query.QuerySet):
                 clone.model.__name__,
                 resource.uri,
                 force_unicode(parameters)))
-            response = resource.get(**parameters)
+            response = resource.get(headers=ROA_HEADERS, **parameters)
         except Exception as e:
             raise ROAException(e)
 
@@ -270,13 +276,13 @@ class RemoteQuerySet(query.QuerySet):
         for local_name, remote_name in ROA_MODEL_NAME_MAPPING:
             response = response.replace(remote_name, local_name)
 
-        deserializer = serializers.get_deserializer(ROA_FORMAT)
-        if hasattr(deserializer, 'deserialize_object'):
-            result = deserializer(response).deserialize_object(response)
-        else:
-            result = deserializer(response).next()
+        parser = self.model.get_parser()
+        parsed_data = parser.parse(StringIO(response))
+        serializer = self.model.get_serializer(data=parsed_data)
+        if not serializer.is_valid():
+            raise ROAException("Couldn't validate the data ({})" % response)
 
-        return result.object
+        return serializer.object
 
     def get(self, *args, **kwargs):
         """
@@ -445,7 +451,7 @@ class RemoteQuerySet(query.QuerySet):
                     return self.count
 
             return FakeInt(self.count())
-        raise ROANotImplementedYetException, 'extra is not yet fully implemented.'
+        raise ROANotImplementedYetException('extra is not yet fully implemented.')
 
     ###################
     # PRIVATE METHODS #
