@@ -59,7 +59,9 @@ class Query(object):
     def set_limits(self, start=None, stop=None):
         self.limit_start = start
         self.limit_stop = stop
-        self.filterable = False
+        # commented out because of the conflict
+        # with admin actions
+        # self.filterable = False
 
     def add_select_related(self, fields):
         """
@@ -425,6 +427,7 @@ class RemoteQuerySet(query.QuerySet):
         clone = self._clone()
         for field_name in field_names:
             clone.query.order_by.append(field_name)
+        clone.query.order_by = list(set(clone.query.order_by))
         return clone
 
     def extra(self, select=None, where=None, params=None, tables=None,
