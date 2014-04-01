@@ -82,12 +82,12 @@ class ROAModelBase(ModelBase):
                     tuple(x.DoesNotExist
                           for x in parents if hasattr(x, '_meta') and not x._meta.abstract)
                     or (ObjectDoesNotExist,),
-                    module, attached_to=new_class))
+                    module))
             new_class.add_to_class('MultipleObjectsReturned', subclass_exception(str('MultipleObjectsReturned'),
                     tuple(x.MultipleObjectsReturned
                           for x in parents if hasattr(x, '_meta') and not x._meta.abstract)
                     or (MultipleObjectsReturned,),
-                    module, attached_to=new_class))
+                    module))
             if base_meta and not base_meta.abstract:
                 # Non-abstract child classes inherit some attributes from their
                 # non-abstract parent (unless an ABC comes before it in the
